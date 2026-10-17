@@ -4,7 +4,6 @@ use std::{
 };
 
 use block2::{Block, RcBlock};
-use irondash_engine_context::EngineContext;
 use irondash_message_channel::{IsolateId, Late};
 use irondash_run_loop::{spawn, util::FutureCompleter, RunLoop};
 use objc2::{
@@ -26,17 +25,22 @@ use crate::{
         Activator, ImageData, Menu, MenuElement, MenuImage, ShowContextMenuRequest,
         ShowContextMenuResponse, WritingToolsReplacementRequest,
     },
-    error::NativeExtensionsResult,
+    error::{NativeExtensionsError, NativeExtensionsResult},
     log::OkLog,
     menu_manager::{PlatformMenuContextDelegate, PlatformMenuContextId, PlatformMenuDelegate},
 };
 
-use super::util::{flip_position, flip_rect, ns_image_for_menu_item};
+use super::{
+    flutter_views::EngineViews,
+    util::{flip_position, flip_rect, ns_image_for_menu_item},
+    PlatformDragContext,
+};
 
 pub struct PlatformMenuContext {
     delegate: Weak<dyn PlatformMenuContextDelegate>,
     context_id: PlatformMenuContextId,
-    view: Id<NSView>,
+    engine_handle: i64,
+    engine_views: EngineViews,
     context_menu_view: Late<Id<SNEContextMenuView>>,
     writing_tool_text: RefCell<Option<String>>,
 }
@@ -306,11 +310,11 @@ impl PlatformMenuContext {
         engine_handle: i64,
         delegate: Weak<dyn PlatformMenuContextDelegate>,
     ) -> NativeExtensionsResult<Self> {
-        let view = EngineContext::get()?.get_flutter_view(engine_handle)?;
         Ok(Self {
             delegate,
             context_id: id,
-            view: unsafe { Id::cast(view) },
+            engine_handle,
+            engine_views: EngineViews::new(engine_handle)?,
             context_menu_view: Late::new(),
             writing_tool_text: RefCell::new(None),
         })
@@ -334,34 +338,43 @@ impl PlatformMenuContext {
         ));
     }
 
+    fn drag_context(&self) -> Option<Rc<PlatformDragContext>> {
+        let delegate = self.delegate.upgrade()?;
+        delegate
+            .get_platform_drag_contexts()
+            .into_iter()
+            .find(|context| context.engine_handle() == self.engine_handle)
+    }
+
+    /// The view that received the last mouse down event (tracked by the drag
+    /// context of the same engine), or the default view of the engine.
+    fn view(&self) -> Option<Id<NSView>> {
+        self.drag_context()
+            .and_then(|context| context.view())
+            .or_else(|| self.engine_views.default_view())
+    }
+
     fn synthesize_mouse_up_event(&self) -> Option<Id<NSEvent>> {
-        if let Some(delegate) = self.delegate.upgrade() {
-            let drag_contexts = delegate.get_platform_drag_contexts();
-            for context in drag_contexts {
-                if *context.view == *self.view {
-                    unsafe {
-                        return context.synthesize_mouse_up_event();
-                    }
-                }
-            }
-        }
-        None
+        let context = self.drag_context()?;
+        unsafe { context.synthesize_mouse_up_event() }
     }
 
     pub async fn show_context_menu(
         &self,
         request: ShowContextMenuRequest,
     ) -> NativeExtensionsResult<ShowContextMenuResponse> {
+        let view = self
+            .view()
+            .ok_or_else(|| NativeExtensionsError::OtherError("Flutter view not found".into()))?;
         let mut position: NSPoint = request.location.into();
-        flip_position(&self.view, &mut position);
+        flip_position(&view, &mut position);
 
         let (future, completer) = FutureCompleter::new();
 
         let ns_menu = request.menu.as_ref().unwrap().menu.clone();
-        let view = self.view.clone();
 
         let context_menu_view = self.context_menu_view.clone();
-        unsafe { self.view.addSubview(&context_menu_view) };
+        unsafe { view.addSubview(&context_menu_view) };
 
         let writing_tools_configuration = &request.writing_tools_configuration;
         if let Some(writing_tools_configuration) = writing_tools_configuration {

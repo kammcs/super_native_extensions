@@ -62,6 +62,7 @@ class DropEventImpl extends DropEvent {
     required super.allowedOperations,
     required super.items,
     super.acceptedOperation,
+    super.viewId,
     this.reader,
   });
 
@@ -94,6 +95,7 @@ class DropEventImpl extends DropEvent {
     return DropEventImpl(
       sessionId: sessionId,
       locationInView: OffsetExt.deserialize(map['locationInView']),
+      viewId: map['viewId'] as int?,
       items: (map['items'] as Iterable)
           .mapIndexed(deserializeItem)
           .toList(growable: false),

@@ -186,6 +186,7 @@ impl PlatformDropContext {
                 x: event.get_x(env)? as f64 / density,
                 y: event.get_y(env)? as f64 / density,
             },
+            view_id: None,
             allowed_operations,
             items,
             accepted_operation,

@@ -6,20 +6,23 @@ use std::{
 };
 
 use block2::RcBlock;
-use irondash_engine_context::EngineContext;
 use irondash_message_channel::{Late, Value};
 use irondash_run_loop::{platform::PollSession, RunLoop};
 use objc2::{
     ffi::NSInteger,
     rc::Id,
-    runtime::{AnyObject, Bool, ProtocolObject, Sel},
+    runtime::{AnyObject, Bool, NSObject, ProtocolObject, Sel},
     sel, ClassType,
 };
 use objc2_app_kit::{
     NSDragOperation, NSDraggingInfo, NSDraggingItem, NSDraggingItemEnumerationOptions,
-    NSFilePromiseReceiver, NSPasteboardItem, NSView,
+    NSFilePromiseReceiver, NSPasteboardItem, NSView, NSWindowDidBecomeKeyNotification,
+    NSWindowDidChangeOcclusionStateNotification, NSWindowWillCloseNotification,
 };
-use objc2_foundation::{ns_string, NSArray, NSDictionary, NSMutableArray, NSRect, NSString};
+use objc2_foundation::{
+    ns_string, NSArray, NSDictionary, NSMutableArray, NSNotification, NSNotificationCenter, NSRect,
+    NSString,
+};
 
 use crate::{
     api_model::DropOperation,
@@ -34,22 +37,38 @@ use crate::{
     value_promise::PromiseResult,
 };
 
-use super::{drag_common::DropOperationExt, util::class_builder_from_name, PlatformDataReader};
+use super::{
+    drag_common::DropOperationExt,
+    flutter_views::{is_same_window, EngineViews},
+    util::class_builder_from_name,
+    PlatformDataReader,
+};
 
 pub struct PlatformDropContext {
     id: PlatformDropContextId,
     weak_self: Late<Weak<Self>>,
-    view: Id<NSView>,
+    engine_views: EngineViews,
+    /// Views registered as drop targets, with their Flutter view identifier.
+    views: RefCell<HashMap<Id<NSView>, Option<i64>>>,
+    dragged_types: RefCell<Option<Id<NSArray<NSString>>>>,
+    window_observers: RefCell<Vec<Id<NSObject>>>,
     delegate: Weak<dyn PlatformDropContextDelegate>,
     sessions: RefCell<HashMap<isize /* draggingSequenceNumber */, Rc<Session>>>,
 }
 
 static ONCE: std::sync::Once = std::sync::Once::new();
 
+/// The view that received a dragging callback. A single dragging session
+/// may move between views (windows) of the same engine.
+#[derive(Clone)]
+struct DropTarget {
+    view: Id<NSView>,
+    view_id: Option<i64>,
+}
+
 struct Session {
     context_id: PlatformDropContextId,
     context_delegate: Weak<dyn PlatformDropContextDelegate>,
-    context_view: Id<NSView>,
     id: DropSessionId,
     last_operation: Cell<DropOperation>,
     reader: Rc<PlatformDataReader>,
@@ -69,6 +88,7 @@ impl Session {
 
     fn event_from_dragging_info(
         &self,
+        target: &DropTarget,
         dragging_info: &ProtocolObject<dyn NSDraggingInfo>,
         accepted_operation: Option<DropOperation>,
     ) -> NativeExtensionsResult<DropEvent> {
@@ -84,7 +104,7 @@ impl Session {
             .unwrap_or_default();
 
         let location = unsafe { dragging_info.draggingLocation() }; // window coordinates
-        let location = self.context_view.convertPoint_fromView(location, None);
+        let location = target.view.convertPoint_fromView(location, None);
 
         let operation_mask = unsafe { dragging_info.draggingSourceOperationMask() };
 
@@ -100,6 +120,7 @@ impl Session {
         Ok(DropEvent {
             session_id: self.id,
             location_in_view: location.into(),
+            view_id: target.view_id,
             allowed_operations: DropOperation::from_platform_mask(operation_mask),
             accepted_operation,
             items,
@@ -109,11 +130,12 @@ impl Session {
 
     fn dragging_updated(
         self: &Rc<Self>,
+        target: &DropTarget,
         dragging_info: &ProtocolObject<dyn NSDraggingInfo>,
     ) -> NativeExtensionsResult<NSDragOperation> {
         let delegate = self.context_delegate()?;
 
-        let event = self.event_from_dragging_info(dragging_info, None)?;
+        let event = self.event_from_dragging_info(target, dragging_info, None)?;
         let session_clone = self.clone();
         delegate.send_drop_update(
             self.context_id,
@@ -140,8 +162,12 @@ impl Session {
         Ok(())
     }
 
-    fn enumerate_items<F>(&self, dragging_info: &ProtocolObject<dyn NSDraggingInfo>, f: F)
-    where
+    fn enumerate_items<F>(
+        &self,
+        target: &DropTarget,
+        dragging_info: &ProtocolObject<dyn NSDraggingInfo>,
+        f: F,
+    ) where
         F: Fn(NonNull<NSDraggingItem>, NSInteger, NonNull<Bool>) + 'static,
     {
         let block = RcBlock::new(f);
@@ -152,7 +178,7 @@ impl Session {
             dragging_info
                 .enumerateDraggingItemsWithOptions_forView_classes_searchOptions_usingBlock(
                     NSDraggingItemEnumerationOptions(0),
-                    Some(&self.context_view),
+                    Some(&target.view),
                     &NSArray::from_vec(vec![class]),
                     &NSDictionary::dictionary(),
                     &block,
@@ -162,15 +188,17 @@ impl Session {
 
     fn prepare_for_drag_operation(
         self: &Rc<Self>,
+        target: &DropTarget,
         dragging_info: &ProtocolObject<dyn NSDraggingInfo>,
     ) -> NativeExtensionsResult<bool> {
         let delegate = self.context_delegate()?;
-        let event = self.event_from_dragging_info(dragging_info, None)?;
+        let event = self.event_from_dragging_info(target, dragging_info, None)?;
         let animates = Rc::new(Cell::new(Bool::NO));
 
         let self_cloned = self.clone();
         let animates_cloned = animates.clone();
-        self.enumerate_items(dragging_info, move |dragging_item, index, _| {
+        let view = target.view.clone();
+        self.enumerate_items(target, dragging_info, move |dragging_item, index, _| {
             let dragging_item = unsafe { Id::retain(dragging_item.as_ptr()) }.unwrap();
             let item = &event.items.get(index as usize);
             if let Some(item) = item {
@@ -200,7 +228,7 @@ impl Session {
                 if let Some(preview) = preview {
                     animates_cloned.set(Bool::YES);
                     let mut rect: NSRect = preview.destination_rect.into();
-                    flip_rect(&self_cloned.context_view, &mut rect);
+                    flip_rect(&view, &mut rect);
                     match preview.destination_image {
                         Some(image) => {
                             let snapshot = ns_image_from_image_data(vec![image]);
@@ -223,11 +251,12 @@ impl Session {
 
     fn perform_drag_operation(
         &self,
+        target: &DropTarget,
         dragging_info: &ProtocolObject<dyn NSDraggingInfo>,
     ) -> NativeExtensionsResult<bool> {
         let delegate = self.context_delegate()?;
         let event =
-            self.event_from_dragging_info(dragging_info, Some(self.last_operation.get()))?;
+            self.event_from_dragging_info(target, dragging_info, Some(self.last_operation.get()))?;
         let done = Rc::new(Cell::new(false));
         let done_clone = done.clone();
         delegate.send_perform_drop(
@@ -268,21 +297,85 @@ impl PlatformDropContext {
         delegate: Weak<dyn PlatformDropContextDelegate>,
     ) -> NativeExtensionsResult<Self> {
         ONCE.call_once(prepare_flutter);
-        let view = EngineContext::get()?.get_flutter_view(engine_handle)?;
         Ok(Self {
             id,
             weak_self: Late::new(),
-            view: unsafe { Id::cast(view) },
+            engine_views: EngineViews::new(engine_handle)?,
+            views: RefCell::new(HashMap::new()),
+            dragged_types: RefCell::new(None),
+            window_observers: RefCell::new(Vec::new()),
             delegate,
             sessions: RefCell::new(HashMap::new()),
         })
     }
 
     pub fn assign_weak_self(&self, weak_self: Weak<Self>) {
-        VIEW_TO_CONTEXT.with(|v| {
-            v.borrow_mut().insert(self.view.clone(), weak_self.clone());
-        });
         self.weak_self.set(weak_self);
+        self.update_views(None);
+        self.observe_windows();
+    }
+
+    /// Windows of the engine may be created and closed at any time (multiple
+    /// views), so keep the set of drop targets in sync with them.
+    fn observe_windows(&self) {
+        let center = unsafe { NSNotificationCenter::defaultCenter() };
+        let notifications = unsafe {
+            [
+                (NSWindowDidBecomeKeyNotification, false),
+                (NSWindowDidChangeOcclusionStateNotification, false),
+                (NSWindowWillCloseNotification, true),
+            ]
+        };
+        let mut observers = self.window_observers.borrow_mut();
+        for (name, closing) in notifications {
+            let weak_self = self.weak_self.clone();
+            let block = RcBlock::new(move |notification: NonNull<NSNotification>| {
+                if let Some(this) = weak_self.upgrade() {
+                    let window = unsafe { notification.as_ref().object() };
+                    let closing_window = if closing { window.as_deref() } else { None };
+                    this.update_views(closing_window);
+                }
+            });
+            let observer = unsafe {
+                center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
+            };
+            observers.push(observer);
+        }
+    }
+
+    /// Registers the views of this engine as drop targets and forgets views
+    /// that are gone. The implicit view, if any, is always a drop target.
+    fn update_views(&self, closing_window: Option<&AnyObject>) {
+        let mut current = HashMap::new();
+        if let Some(view) = self.engine_views.implicit_view() {
+            current.insert(view.clone(), self.engine_views.view_id(view));
+        }
+        for info in self.engine_views.views() {
+            if !is_same_window(closing_window, &info.window) {
+                current.insert(info.view, Some(info.view_id));
+            }
+        }
+
+        let mut views = self.views.borrow_mut();
+        let dragged_types = self.dragged_types.borrow();
+        VIEW_TO_CONTEXT.with(|v| {
+            let mut view_to_context = v.borrow_mut();
+            for view in views.keys() {
+                if !current.contains_key(view) {
+                    remove_view_context(&mut view_to_context, view, self);
+                    unsafe { view.unregisterDraggedTypes() };
+                }
+            }
+            for view in current.keys() {
+                if !views.contains_key(view) {
+                    view_to_context.insert(view.clone(), self.weak_self.clone());
+                    if let Some(dragged_types) = dragged_types.as_ref() {
+                        unsafe { view.registerForDraggedTypes(dragged_types) };
+                    }
+                }
+            }
+        });
+        *views = current;
     }
 
     pub fn register_drop_formats(&self, types: &[String]) -> NativeExtensionsResult<()> {
@@ -295,10 +388,22 @@ impl PlatformDropContext {
             all_types.addObjectsFromArray(&our_types);
             all_types.addObjectsFromArray(&promise_receiver_types);
             all_types.addObject(ns_string!("dev.nativeshell.placeholder-item"));
-            self.view.registerForDraggedTypes(&all_types);
+        }
+        let all_types = Id::into_super(all_types);
+        self.dragged_types.replace(Some(all_types.clone()));
+
+        self.update_views(None);
+        for view in self.views.borrow().keys() {
+            unsafe { view.registerForDraggedTypes(&all_types) };
         }
 
         Ok(())
+    }
+
+    fn drop_target(&self, view: &NSView) -> DropTarget {
+        let view = view.retain();
+        let view_id = self.views.borrow().get(&view).copied().flatten();
+        DropTarget { view, view_id }
     }
 
     fn session_for_dragging_info(
@@ -324,7 +429,6 @@ impl PlatformDropContext {
                 Rc::new(Session {
                     context_id: self.id,
                     context_delegate: self.delegate.clone(),
-                    context_view: self.view.clone(),
                     id: dragging_sequence_number.into(),
                     last_operation: Cell::new(DropOperation::None),
                     reader: platform_reader,
@@ -336,10 +440,11 @@ impl PlatformDropContext {
 
     fn dragging_updated(
         &self,
+        view: &NSView,
         dragging_info: &ProtocolObject<dyn NSDraggingInfo>,
     ) -> NativeExtensionsResult<NSDragOperation> {
         self.session_for_dragging_info(dragging_info)?
-            .dragging_updated(dragging_info)
+            .dragging_updated(&self.drop_target(view), dragging_info)
     }
 
     fn dragging_exited(
@@ -352,18 +457,20 @@ impl PlatformDropContext {
 
     fn prepare_for_drag_operation(
         &self,
+        view: &NSView,
         dragging_info: &ProtocolObject<dyn NSDraggingInfo>,
     ) -> NativeExtensionsResult<bool> {
         self.session_for_dragging_info(dragging_info)?
-            .prepare_for_drag_operation(dragging_info)
+            .prepare_for_drag_operation(&self.drop_target(view), dragging_info)
     }
 
     fn perform_drag_operation(
         &self,
+        view: &NSView,
         dragging_info: &ProtocolObject<dyn NSDraggingInfo>,
     ) -> NativeExtensionsResult<bool> {
         self.session_for_dragging_info(dragging_info)?
-            .perform_drag_operation(dragging_info)
+            .perform_drag_operation(&self.drop_target(view), dragging_info)
     }
 
     fn dragging_ended(
@@ -382,11 +489,32 @@ impl PlatformDropContext {
 
 impl Drop for PlatformDropContext {
     fn drop(&mut self) {
+        let center = unsafe { NSNotificationCenter::defaultCenter() };
+        for observer in self.window_observers.borrow().iter() {
+            unsafe { center.removeObserver(observer) };
+        }
         VIEW_TO_CONTEXT
             .try_with(|v| {
-                v.borrow_mut().remove(&*self.view);
+                let mut view_to_context = v.borrow_mut();
+                for view in self.views.borrow().keys() {
+                    remove_view_context(&mut view_to_context, view, self);
+                }
             })
             .ok();
+    }
+}
+
+/// Removes the mapping of `view` if it belongs to `context`.
+fn remove_view_context(
+    view_to_context: &mut HashMap<Id<NSView>, Weak<PlatformDropContext>>,
+    view: &Id<NSView>,
+    context: &PlatformDropContext,
+) {
+    if view_to_context
+        .get(view)
+        .is_some_and(|c| std::ptr::eq(c.as_ptr(), context))
+    {
+        view_to_context.remove(view);
     }
 }
 
@@ -456,7 +584,7 @@ extern "C" fn dragging_updated(
         this,
         |state| {
             state
-                .dragging_updated(dragging_info)
+                .dragging_updated(this, dragging_info)
                 .ok_log()
                 .unwrap_or(NSDragOperation::None)
         },
@@ -485,7 +613,7 @@ extern "C" fn prepare_for_drag_operation(
         this,
         |state| {
             if state
-                .prepare_for_drag_operation(dragging_info)
+                .prepare_for_drag_operation(this, dragging_info)
                 .ok_log()
                 .unwrap_or(false)
             {
@@ -507,7 +635,7 @@ extern "C" fn perform_drag_operation(
         this,
         |state| {
             if state
-                .perform_drag_operation(dragging_info)
+                .perform_drag_operation(this, dragging_info)
                 .ok_log()
                 .unwrap_or(false)
             {

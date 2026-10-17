@@ -1,12 +1,12 @@
 import 'dart:async';
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:super_native_extensions/raw_menu.dart' as raw;
 
 import 'menu.dart';
 import 'menu_model.dart';
+import 'util.dart';
 
 class MenuContextDelegate implements raw.MenuContextDelegate {
   static final instance = MenuContextDelegate();
@@ -16,9 +16,7 @@ class MenuContextDelegate implements raw.MenuContextDelegate {
     MobileMenuConfigurationRequest request,
   ) async {
     final hitTest = HitTestResult();
-    // TODO(knopp): Resolve when we can provide viewId from native side
-    // ignore: deprecated_member_use
-    GestureBinding.instance.hitTest(hitTest, request.location);
+    hitTestInView(hitTest, request.location);
     for (final item in hitTest.path) {
       final target = item.target;
       if (target is _RenderBaseContextMenu) {
@@ -98,9 +96,7 @@ class MenuContextDelegate implements raw.MenuContextDelegate {
   @override
   bool contextMenuIsAllowed(Offset location) {
     final hitTest = HitTestResult();
-    // TODO(knopp): Resolve when we can provide viewId from native side
-    // ignore: deprecated_member_use
-    GestureBinding.instance.hitTest(hitTest, location);
+    hitTestInView(hitTest, location);
     for (final item in hitTest.path) {
       final target = item.target;
       if (target is _RenderBaseContextMenu) {

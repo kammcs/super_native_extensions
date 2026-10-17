@@ -3,6 +3,7 @@ mod data_provider;
 mod drag;
 mod drag_common;
 mod drop;
+mod flutter_views;
 mod hot_key;
 mod hot_key_sys;
 mod keyboard_layout;

@@ -6,6 +6,7 @@ import 'package:super_native_extensions/raw_menu.dart';
 
 import 'base_draggable_widget.dart';
 import 'into_raw.dart';
+import 'util.dart';
 
 class BaseDraggableRenderWidget extends SingleChildRenderObjectWidget {
   const BaseDraggableRenderWidget({
@@ -70,9 +71,7 @@ class _DragContextDelegate implements raw.DragContextDelegate {
     required raw.DragSession session,
   }) async {
     final hitTest = HitTestResult();
-    // TODO(knopp): Resolve when we can provide viewId from native side
-    // ignore: deprecated_member_use
-    GestureBinding.instance.hitTest(hitTest, location);
+    hitTestInView(hitTest, location);
     for (final item in hitTest.path) {
       final target = item.target;
       if (target is _RenderBaseDraggable &&
@@ -91,9 +90,7 @@ class _DragContextDelegate implements raw.DragContextDelegate {
   Future<List<raw.DragItem>?> getAdditionalItemsForLocation(
       {required Offset location, required raw.DragSession session}) async {
     final hitTest = HitTestResult();
-    // TODO(knopp): Resolve when we can provide viewId from native side
-    // ignore: deprecated_member_use
-    GestureBinding.instance.hitTest(hitTest, location);
+    hitTestInView(hitTest, location);
     for (final item in hitTest.path) {
       final target = item.target;
       if (target is _RenderBaseDraggable) {
@@ -110,9 +107,7 @@ class _DragContextDelegate implements raw.DragContextDelegate {
   @override
   bool isLocationDraggable(Offset location) {
     final hitTest = HitTestResult();
-    // TODO(knopp): Resolve when we can provide viewId from native side
-    // ignore: deprecated_member_use
-    GestureBinding.instance.hitTest(hitTest, location);
+    hitTestInView(hitTest, location);
     for (final item in hitTest.path) {
       final target = item.target;
       if (target is _RenderBaseDraggable) {

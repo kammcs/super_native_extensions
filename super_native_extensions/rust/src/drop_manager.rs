@@ -92,6 +92,8 @@ pub struct DropItem {
 pub struct DropEvent {
     pub session_id: DropSessionId,
     pub location_in_view: Point,
+    /// Identifier of the Flutter view the location is in, if known.
+    pub view_id: Option<i64>,
     pub allowed_operations: Vec<DropOperation>,
     pub accepted_operation: Option<DropOperation>,
     pub items: Vec<DropItem>,

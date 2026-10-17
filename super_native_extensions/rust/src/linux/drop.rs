@@ -168,6 +168,7 @@ impl PlatformDropContext {
                 x: x as f64,
                 y: y as f64,
             },
+            view_id: None,
             allowed_operations: DropOperation::from_platform_mask(context.actions()),
             accepted_operation,
             items: (0..number_of_items)

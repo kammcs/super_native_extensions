@@ -157,6 +157,7 @@ impl Session {
         Ok(DropEvent {
             session_id: self.session_id(),
             location_in_view: location.into(),
+            view_id: None,
             allowed_operations,
             items,
             accepted_operation,

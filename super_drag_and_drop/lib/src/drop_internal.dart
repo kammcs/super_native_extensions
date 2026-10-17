@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:ui' as ui;
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import 'package:super_native_extensions/raw_drag_drop.dart' as raw;
@@ -99,6 +98,7 @@ class _DropSession extends DropSession {
 
   Future<raw.DropOperation> update({
     required ui.Offset position,
+    required int? viewId,
     required Set<raw.DropOperation> allowedOperations,
   }) async {
     _allowedOperations.clear();
@@ -106,9 +106,7 @@ class _DropSession extends DropSession {
     _inside = true;
 
     final hitTest = HitTestResult();
-    // TODO(knopp): Resolve when we can provide viewId from native side
-    // ignore: deprecated_member_use
-    GestureBinding.instance.hitTest(hitTest, position);
+    hitTestInView(hitTest, position, viewId: viewId);
 
     final monitorsInHitTest = <RenderDropMonitor>{};
     RenderDropRegion? dropRegion;
@@ -283,6 +281,7 @@ class _DropContextDelegate extends raw.DropContextDelegate {
     );
     return session.update(
       position: event.locationInView,
+      viewId: event.viewId,
       allowedOperations: Set.from(event.allowedOperations),
     );
   }

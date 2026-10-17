@@ -74,6 +74,7 @@ class DropEvent extends BaseDropEvent {
     required this.allowedOperations,
     required this.items,
     this.acceptedOperation,
+    this.viewId,
   });
 
   final ui.Offset locationInView;
@@ -81,10 +82,15 @@ class DropEvent extends BaseDropEvent {
   final List<DropItem> items;
   final DropOperation? acceptedOperation;
 
+  /// Identifier of the Flutter view that [locationInView] is relative to,
+  /// if known. When null the location is relative to the implicit view.
+  final int? viewId;
+
   @override
   String toString() => {
     'sessionId': sessionId,
     'locationInView': locationInView.serialize(),
+    'viewId': viewId,
     'items': items.map((e) => e.toString()),
     'allowedOperation': allowedOperations
         .map((e) => e.name)

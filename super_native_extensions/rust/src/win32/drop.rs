@@ -254,6 +254,7 @@ impl PlatformDropContext {
                 x: pt.x as f64 / scaling,
                 y: pt.y as f64 / scaling,
             },
+            view_id: None,
             allowed_operations: DropOperation::from_platform_mask(mask),
             accepted_operation,
             items,
